@@ -198,7 +198,19 @@ Existing transforms become polygon-aware:
 
 #### 4.2.5 Solver (`yolo/tools/solver.py`)
 
-`training_step` is extended to unpack `gt_masks` from the batch and forward them to `loss_fn`. The `Vec2Box` pipeline must be reviewed carefully: it currently assumes detection-only output, and the seg head's mask-coefficient and prototype outputs need a clear path through (or around) it. **This is the highest-risk change** and is called out in §7.
+`training_step` is extended to unpack `gt_masks` from the batch and forward them to `loss_fn`.
+
+**Most invasive code change** — the `MultiheadSegmentation.forward` method itself is currently incomplete. As written in `yolo/model/module.py:162-163` it only iterates `self.heads` (mask coefficient heads + prototype Conv) and never invokes `self.detect`, so the model emits mask outputs but no detection outputs. Detection and segmentation outputs are architecturally parallel branches sharing backbone+neck features, but they are functionally coupled at inference and loss time (mask synthesis depends on bbox NMS survivors and bbox cropping; mask loss depends on `BoxMatcher`'s detection-driven anchor-to-target matching). To enable training, `MultiheadSegmentation.forward` is rewired to:
+
+```python
+def forward(self, x_list):
+    detect_outputs = self.detect(x_list[:-1])             # detection per FPN
+    mask_coefs = [self.heads[i](x_list[i]) for i in range(len(x_list) - 1)]
+    proto = self.heads[-1](x_list[-1])
+    return {"detect": detect_outputs, "mask_coefs": mask_coefs, "proto": proto}
+```
+
+`Vec2Box` itself does not need changes — it continues to decode detection outputs (the `detect_outputs` tuple per FPN level) into absolute-coordinate boxes. Mask outputs (`mask_coefs`, `proto`) bypass `Vec2Box` entirely and are passed directly to `MaskLoss`, since YOLACT-style mask synthesis (`sigmoid(coef ⊙ proto)` followed by bbox crop) does not require an anchor-grid decoding step analogous to bbox decoding. The solver and `DualLoss` route the dict accordingly.
 
 #### 4.2.6 Collate Function
 
@@ -363,7 +375,7 @@ Each step is a separate commit. Steps 6 and 12 are explicit go/no-go gates.
 
 | Risk | Mitigation |
 |---|---|
-| `Vec2Box` pipeline currently assumes detection-only outputs; routing mask coefficients and prototypes through (or around) it is the most architecturally invasive change. | Explicitly addressed first in implementation. Likely add a `task_type`-aware branch that extracts mask outputs before `Vec2Box` is invoked. |
+| `MultiheadSegmentation.forward` is incomplete in upstream — it only emits mask coefficient + prototype outputs and never calls `self.detect`, so detection outputs are missing entirely from the seg model. This is the most invasive code change. | Rewire `forward` to call `self.detect` and return both detection and mask outputs in a structured dict, as detailed in §4.2.5. `Vec2Box` itself is unchanged. |
 | `BoxMatcher` output format may need extension to surface the matched-target index for mask supervision. | Reuse existing matching result; add a thin index-extraction utility. |
 | Mosaic ↔ polygon clipping correctness at corner cases. | Dedicated unit tests, including degenerate cases (polygon entirely outside, polygon spanning two cells). |
 | Colab Free GPU disconnect / preemption. | Auto-resume from `last.ckpt`; Kaggle backup notebook prepared in advance. |
