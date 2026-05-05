@@ -148,3 +148,9 @@ node_modules/
 
 # Not ignore image for demo
 !demo/images/*/*.png
+
+# climbing-seg project artifacts
+data/climbing_holds/
+weights/
+.tensorboard/
+sanity/
