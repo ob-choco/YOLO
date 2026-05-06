@@ -1,5 +1,5 @@
 import random
-from typing import List, Optional, Union
+from typing import List, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -9,6 +9,61 @@ from torchvision.transforms.functional import to_pil_image
 from yolo.config.config import ModelConfig
 from yolo.model.yolo import YOLO
 from yolo.utils.logger import logger
+
+
+_MASK_PALETTE = np.array(
+    [(0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)],
+    dtype=np.float32,
+)
+
+
+def draw_masks(
+    img: Image.Image,
+    masks: Sequence[torch.Tensor],
+    bboxes: Sequence[Sequence[float]],
+    *,
+    idx2label: Optional[list] = None,
+    alpha: float = 0.5,
+) -> Image.Image:
+    """Overlay per-instance binary masks on a PIL image with bbox + class label.
+
+    Args:
+        img: source RGB PIL.Image to draw on (not modified — a new image is returned).
+        masks: iterable of 2D tensors (H, W), uint8 with 0/1 values, one per instance.
+            If mask spatial size differs from `img.size`, it is nearest-resized to match.
+        bboxes: per-instance rows. Either `[x1, y1, x2, y2, cls]` or
+            `[x1, y1, x2, y2, cls, score]`. Coords are absolute pixel space of `img`.
+        idx2label: optional list mapping class index → label string.
+        alpha: blending factor for mask overlay (0=transparent, 1=opaque).
+
+    Returns:
+        New PIL.Image with masks blended and bboxes drawn.
+    """
+    np_img = np.array(img.convert("RGB")).astype(np.float32)
+    overlay = np_img.copy()
+    H_img, W_img = np_img.shape[:2]
+
+    for i, m in enumerate(masks):
+        col = _MASK_PALETTE[i % len(_MASK_PALETTE)]
+        m_np = m.detach().cpu().numpy() if isinstance(m, torch.Tensor) else np.asarray(m)
+        if m_np.shape != (H_img, W_img):
+            # Nearest-resize via PIL to avoid SciPy dependency.
+            m_pil = Image.fromarray((m_np > 0).astype(np.uint8) * 255).resize((W_img, H_img))
+            m_bool = np.array(m_pil) > 127
+        else:
+            m_bool = m_np > 0
+        overlay[m_bool] = (1.0 - alpha) * np_img[m_bool] + alpha * col
+
+    blended = Image.fromarray(overlay.astype(np.uint8))
+    draw = ImageDraw.Draw(blended)
+    for i, bbox in enumerate(bboxes):
+        x1, y1, x2, y2 = (float(v) for v in bbox[:4])
+        cls = int(bbox[4]) if len(bbox) >= 5 else 0
+        col = tuple(int(c) for c in _MASK_PALETTE[i % len(_MASK_PALETTE)])
+        draw.rectangle([x1, y1, x2, y2], outline=col, width=2)
+        label = idx2label[cls] if idx2label and 0 <= cls < len(idx2label) else str(cls)
+        draw.text((x1, max(0.0, y1 - 10)), label, fill=col)
+    return blended
 
 
 def draw_bboxes(
