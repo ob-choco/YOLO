@@ -19,12 +19,27 @@ class AugmentationComposer:
             if hasattr(transform, "set_parent"):
                 transform.set_parent(self)
 
-    def __call__(self, image, boxes=torch.zeros(0, 5)):
+    def __call__(self, image, boxes=torch.zeros(0, 5), polygons=None):
         for transform in self.transforms:
-            image, boxes = transform(image, boxes)
-        image, boxes, rev_tensor = self.pad_resize(image, boxes)
+            if polygons is None:
+                image, boxes = transform(image, boxes)
+            else:
+                try:
+                    image, boxes, polygons = transform(image, boxes, polygons=polygons)
+                except TypeError:
+                    raise NotImplementedError(
+                        f"Augmentation {type(transform).__name__} is not polygon-aware. "
+                        "Use only polygon-aware augmentations in segmentation datasets."
+                    )
+        if polygons is None:
+            image, boxes, rev_tensor = self.pad_resize(image, boxes)
+        else:
+            image, boxes, polygons = self.pad_resize(image, boxes, polygons=polygons)
+            rev_tensor = self.pad_resize.last_transform_info
         image = TF.to_tensor(image)
-        return image, boxes, rev_tensor
+        if polygons is None:
+            return image, boxes, rev_tensor
+        return image, boxes, polygons, rev_tensor
 
 
 class RemoveOutliers:
@@ -37,20 +52,27 @@ class RemoveOutliers:
         """
         self.min_box_area = min_box_area
 
-    def __call__(self, image, boxes):
+    def __call__(self, image, boxes, polygons=None):
         """
         Args:
             image (PIL.Image): The cropped image.
             boxes (torch.Tensor): Bounding boxes in normalized coordinates (x_min, y_min, x_max, y_max).
+            polygons (list or None): Optional list of polygon arrays parallel to boxes.
         Returns:
             PIL.Image: The input image (unchanged).
             torch.Tensor: Filtered bounding boxes.
+            list (only when polygons is not None): Filtered polygons parallel to output boxes.
         """
         box_areas = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 4] - boxes[:, 2])
 
         valid_boxes = (box_areas > self.min_box_area) & (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 4] > boxes[:, 2])
 
-        return image, boxes[valid_boxes]
+        if polygons is None:
+            return image, boxes[valid_boxes]
+
+        valid_indices = valid_boxes.nonzero(as_tuple=True)[0].tolist()
+        filtered_polygons = [polygons[i] for i in valid_indices]
+        return image, boxes[valid_boxes], filtered_polygons
 
 
 class PadAndResize:
@@ -62,7 +84,7 @@ class PadAndResize:
     def set_size(self, image_size: List[int]):
         self.target_width, self.target_height = image_size
 
-    def __call__(self, image: Image, boxes):
+    def __call__(self, image: Image, boxes, polygons=None):
         img_width, img_height = image.size
         scale = min(self.target_width / img_width, self.target_height / img_height)
         new_width, new_height = int(img_width * scale), int(img_height * scale)
@@ -78,7 +100,22 @@ class PadAndResize:
         boxes[:, [2, 4]] = (boxes[:, [2, 4]] * new_height + pad_top) / self.target_height
 
         transform_info = torch.tensor([scale, pad_left, pad_top, pad_left, pad_top])
-        return padded_image, boxes, transform_info
+        # Store transform_info so callers can retrieve it even in polygon mode.
+        self.last_transform_info = transform_info
+
+        if polygons is None:
+            return padded_image, boxes, transform_info
+
+        transformed_polygons = []
+        for p in polygons:
+            pts = np.asarray(p).reshape(-1, 2).astype(np.float32, copy=True)
+            pts[:, 0] = (pts[:, 0] * new_width + pad_left) / self.target_width
+            pts[:, 1] = (pts[:, 1] * new_height + pad_top) / self.target_height
+            pts = np.clip(pts, 0.0, 1.0)
+            transformed_polygons.append(pts.reshape(1, -1))
+        # Return 3-tuple in polygon mode: (image, boxes, polygons).
+        # transform_info is accessible via self.last_transform_info.
+        return padded_image, boxes, transformed_polygons
 
 
 class HorizontalFlip:
