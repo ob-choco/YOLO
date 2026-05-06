@@ -1,0 +1,6 @@
+path: data/climbing_holds
+train: images/train
+validation: images/val
+
+class_num: 2
+class_list: ["hold", "volume"]
