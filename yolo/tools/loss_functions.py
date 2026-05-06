@@ -117,8 +117,16 @@ class DualLoss:
         self.dfl_rate = loss_cfg.objective["DFLoss"]
         self.cls_rate = loss_cfg.objective["BCELoss"]
 
+        self.task_type = getattr(cfg.model, "task_type", "detection")
+        if self.task_type == "segmentation":
+            mask_cfg = getattr(loss_cfg, "mask", None)
+            bce_w = getattr(mask_cfg, "bce_weight", 0.5) if mask_cfg is not None else 0.5
+            dice_w = getattr(mask_cfg, "dice_weight", 0.5) if mask_cfg is not None else 0.5
+            self.mask_loss = MaskLoss(bce_weight=bce_w, dice_weight=dice_w)
+            self.mask_rate = loss_cfg.objective.get("MaskLoss", 7.5)
+
     def __call__(
-        self, aux_predicts: List[Tensor], main_predicts: List[Tensor], targets: Tensor
+        self, aux_predicts: List[Tensor], main_predicts: List[Tensor], targets: Tensor, mask_inputs=None
     ) -> Tuple[Tensor, Dict[str, float]]:
         # TODO: Need Refactor this region, make it flexible!
         aux_iou, aux_dfl, aux_cls = self.loss(aux_predicts, targets)
@@ -132,6 +140,14 @@ class DualLoss:
         loss_dict = {
             f"Loss/{name}Loss": value.detach().item() for name, value in zip(["Box", "DFL", "BCE"], total_loss)
         }
+
+        # segmentation (main only)
+        if self.task_type == "segmentation" and mask_inputs is not None:
+            coefs, proto, gt_masks, target_bbox, match_idx = mask_inputs
+            ml = self.mask_loss(coefs, proto, gt_masks, target_bbox, match_idx)
+            total_loss.append(self.mask_rate * ml)
+            loss_dict["Loss/MaskLoss"] = ml.detach().item()
+
         return sum(total_loss), loss_dict
 
 

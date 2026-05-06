@@ -54,3 +54,27 @@ def test_yolo_loss(loss_function, data):
     assert loss_dict["Loss/BoxLoss"] == 0
     assert loss_dict["Loss/DFLLoss"] == 0
     assert loss_dict["Loss/BCELoss"] >= 2e5
+
+
+def test_dualloss_constructs_in_segmentation_mode(cfg, vec2box):
+    """When cfg.model.task_type=='segmentation', DualLoss carries a MaskLoss."""
+    from omegaconf import OmegaConf
+    cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    cfg.model.task_type = "segmentation"
+    # ensure objective dict has MaskLoss entry; otherwise default 7.5 used
+    cfg.task.loss.objective = OmegaConf.create({"BoxLoss": 7.5, "DFLoss": 1.5, "BCELoss": 0.5, "MaskLoss": 7.5})
+    cfg.task.loss.mask = OmegaConf.create({"bce_weight": 0.5, "dice_weight": 0.5})
+
+    from yolo.tools.loss_functions import DualLoss, MaskLoss
+    dl = DualLoss(cfg, vec2box)
+    assert hasattr(dl, "mask_loss")
+    assert isinstance(dl.mask_loss, MaskLoss)
+    assert dl.mask_rate == 7.5
+
+
+def test_dualloss_detection_mode_unchanged(cfg, vec2box):
+    """When task_type defaults to 'detection', DualLoss has no mask_loss attr."""
+    from yolo.tools.loss_functions import DualLoss
+    dl = DualLoss(cfg, vec2box)
+    # Detection-only: mask_loss should NOT be constructed
+    assert not hasattr(dl, "mask_loss") or dl.task_type != "segmentation"
