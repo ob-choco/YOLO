@@ -27,6 +27,7 @@ class ValidateModel(BaseModel):
     def __init__(self, cfg: Config):
         super().__init__(cfg)
         self.cfg = cfg
+        self.task_type = getattr(cfg.model, "task_type", "detection")
         if self.cfg.task.task == "validation":
             self.validation_cfg = self.cfg.task
         else:
@@ -46,7 +47,12 @@ class ValidateModel(BaseModel):
         return self.val_loader
 
     def validation_step(self, batch, batch_idx):
-        batch_size, images, targets, rev_tensor, img_paths = batch
+        # Seg-mode collate emits an extra `gt_masks` slot between targets and rev_tensor.
+        # Strip it; bbox metric path doesn't consume masks.
+        if self.task_type == "segmentation":
+            batch_size, images, targets, _gt_masks, rev_tensor, img_paths = batch
+        else:
+            batch_size, images, targets, rev_tensor, img_paths = batch
         H, W = images.shape[2:]
         predicts = self.post_process(self.ema(images), image_size=[W, H])
         mAP = self.metric(

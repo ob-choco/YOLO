@@ -273,7 +273,7 @@ class RandomCrop:
         """
         self.prob = prob
 
-    def __call__(self, image, boxes):
+    def __call__(self, image, boxes, polygons=None):
         if torch.rand(1) < self.prob:
             original_width, original_height = image.size
             crop_height, crop_width = original_height // 2, original_width // 2
@@ -291,4 +291,15 @@ class RandomCrop:
             boxes[:, [1, 3]] /= crop_width
             boxes[:, [2, 4]] /= crop_height
 
-        return image, boxes
+            if polygons is not None:
+                cropped = []
+                for p in polygons:
+                    pts = np.asarray(p).reshape(-1, 2).astype(np.float32, copy=True)
+                    pts[:, 0] = (pts[:, 0] * original_width - left).clip(0, crop_width) / crop_width
+                    pts[:, 1] = (pts[:, 1] * original_height - top).clip(0, crop_height) / crop_height
+                    cropped.append(pts.reshape(1, -1))
+                polygons = cropped
+
+        if polygons is None:
+            return image, boxes
+        return image, boxes, polygons

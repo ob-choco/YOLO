@@ -215,7 +215,11 @@ class PostProcess:
     ) -> List[Tensor]:
         if image_size is not None:
             self.converter.update(image_size)
-        prediction = self.converter(predict["Main"])
+        # MultiheadSegmentation emits a dict at "Main" with detect/mask_coefs/proto.
+        # Detection-only models still emit a list. Pick the detection list either way.
+        main = predict["Main"]
+        detect = main["detect"] if isinstance(main, dict) else main
+        prediction = self.converter(detect)
         pred_class, _, pred_bbox = prediction[:3]
         pred_conf = prediction[3] if len(prediction) == 4 else None
         if rev_tensor is not None:

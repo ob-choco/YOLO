@@ -368,8 +368,12 @@ class Vec2Box:
         # TODO: need accelerate dummy test
         dummy_input = torch.zeros(1, 3, H, W)
         dummy_output = model(dummy_input)
+        # Seg models (MultiheadSegmentation) return a dict at "Main"; pick the
+        # detection list. Detection-only models still return a list directly.
+        main = dummy_output["Main"]
+        detect_list = main["detect"] if isinstance(main, dict) else main
         strides = []
-        for predict_head in dummy_output["Main"]:
+        for predict_head in detect_list:
             _, _, *anchor_num = predict_head[2].shape
             strides.append(W // anchor_num[1])
         return strides

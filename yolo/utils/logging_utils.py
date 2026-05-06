@@ -229,7 +229,10 @@ class ImageLogger(Callback):
             return
         from yolo.tools.drawer import draw_bboxes
 
-        batch_size, images, targets, rev_tensor, img_paths = batch
+        # Seg-mode batches carry an extra `gt_masks` slot. Unpack tail-flexibly so
+        # both 5-tuple (detection) and 6-tuple (segmentation) batches are accepted.
+        batch_size, images, targets = batch[0], batch[1], batch[2]
+        rev_tensor, img_paths = batch[-2], batch[-1]
         predicts, _ = outputs
         gt_boxes = targets[0] if targets.ndim == 3 else targets
         pred_boxes = predicts[0] if isinstance(predicts, list) else predicts
