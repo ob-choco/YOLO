@@ -4,6 +4,7 @@ from itertools import chain
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 import torch
 
@@ -135,3 +136,28 @@ def tensorlize(data):
     img_paths = np.array(img_paths)
     img_ratios = np.array(img_ratios)
     return img_paths, bboxes, img_ratios
+
+
+def rasterize_masks(polygons, image_size, mask_ratio: int = 4):
+    """Rasterize a list of normalized polygons to binary masks at stride-`mask_ratio`.
+
+    Args:
+        polygons: List[np.ndarray]; each entry shape (1, 2K) flat normalized [0,1] coords.
+        image_size: (W, H) of the source image space.
+        mask_ratio: downsample ratio for mask resolution (4 → masks at stride 4).
+
+    Returns:
+        torch.uint8 tensor of shape (N, H/mask_ratio, W/mask_ratio).
+    """
+    import torch
+
+    W, H = image_size
+    h, w = H // mask_ratio, W // mask_ratio
+    if not polygons:
+        return torch.zeros((0, h, w), dtype=torch.uint8)
+    masks = np.zeros((len(polygons), h, w), dtype=np.uint8)
+    for i, poly in enumerate(polygons):
+        flat = np.asarray(poly).reshape(-1, 2)
+        pts = (flat * np.array([w, h])).astype(np.int32)
+        cv2.fillPoly(masks[i], [pts], 1)
+    return torch.from_numpy(masks)
