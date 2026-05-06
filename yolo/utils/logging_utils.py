@@ -224,20 +224,33 @@ class YOLORichModelSummary(RichModelSummary):
 
 
 class ImageLogger(Callback):
-    def on_validation_batch_end(self, trainer: Trainer, pl_module, outputs, batch, batch_idx) -> None:
+    def on_validation_batch_end(self, trainer: Trainer, pl_module, outputs, batch, batch_idx, dataloader_idx: int = 0) -> None:
         if batch_idx != 0:
             return
+        from yolo.tools.drawer import draw_bboxes
+
         batch_size, images, targets, rev_tensor, img_paths = batch
         predicts, _ = outputs
         gt_boxes = targets[0] if targets.ndim == 3 else targets
         pred_boxes = predicts[0] if isinstance(predicts, list) else predicts
         images = [images[0]]
         step = trainer.current_epoch
-        for logger in trainer.loggers:
-            if isinstance(logger, WandbLogger):
-                logger.log_image("Input Image", images, step=step)
-                logger.log_image("Ground Truth", images, step=step, boxes=[log_bbox(gt_boxes)])
-                logger.log_image("Prediction", images, step=step, boxes=[log_bbox(pred_boxes)])
+        has_wandb = False
+        for log in trainer.loggers:
+            if isinstance(log, WandbLogger):
+                has_wandb = True
+                log.log_image("Input Image", images, step=step)
+                log.log_image("Ground Truth", images, step=step, boxes=[log_bbox(gt_boxes)])
+                log.log_image("Prediction", images, step=step, boxes=[log_bbox(pred_boxes)])
+        if not has_wandb:
+            # Fallback: save a bbox-overlay PNG to the run directory
+            class_list = getattr(pl_module.cfg.dataset, "class_list", None)
+            pred_img = draw_bboxes(images[0], pred_boxes, idx2label=class_list)
+            save_dir = Path(trainer.default_root_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            save_path = save_dir / f"val_pred_epoch{step:03d}.png"
+            pred_img.save(save_path)
+            logger.info(f"💾 Saved val prediction image: {save_path}")
 
 
 def setup_logger(logger_name, quiet=False):
