@@ -32,11 +32,20 @@ class YoloDataset(Dataset):
         self.batch_size = data_cfg.batch_size
         self.dynamic_shape = getattr(data_cfg, "dynamic_shape", False)
         self.base_size = mean(self.image_size)
+        self.task_type = getattr(dataset_cfg, "task_type", "detection")
 
         transforms = [eval(aug)(prob) for aug, prob in augment_cfg.items()]
         self.transform = AugmentationComposer(transforms, self.image_size, self.base_size)
         self.transform.get_more_data = self.get_more_data
-        self.img_paths, self.bboxes, self.ratios = tensorlize(self.load_data(Path(dataset_cfg.path), phase_name))
+
+        if self.task_type == "segmentation":
+            # Skip cache in segmentation mode to avoid cache format conflicts.
+            data = self.filter_data(Path(dataset_cfg.path), phase_name, self.dynamic_shape)
+            # For seg mode, store 4-tuples; tensorlize only the 3-tuple detection portion.
+            self.img_paths, self.bboxes, self.ratios, self.polygons = self._tensorlize_seg(data)
+        else:
+            self.img_paths, self.bboxes, self.ratios = tensorlize(self.load_data(Path(dataset_cfg.path), phase_name))
+            self.polygons = None
 
     def load_data(self, dataset_path: Path, phase_name: str):
         """
@@ -120,23 +129,29 @@ class YoloDataset(Dataset):
             else:
                 image_seg_annotations = []
 
-            labels = self.load_valid_labels(image_id, image_seg_annotations)
+            result = self.load_valid_labels(image_id, image_seg_annotations)
+            labels, polygons = result
             img_path = image_name if adjust_path else images_path / image_name
             if sort_image:
                 with Image.open(img_path) as img:
                     width, height = ImageOps.exif_transpose(img).size
             else:
                 width, height = 0, 1
-            data.append((img_path, labels, width / height))
+            if self.task_type == "segmentation":
+                data.append((img_path, labels, polygons, width / height))
+            else:
+                data.append((img_path, labels, width / height))
             if len(image_seg_annotations) != 0:
                 valid_inputs += 1
 
-        data = sorted(data, key=lambda x: x[2], reverse=True)
+        # Sort by image aspect ratio. In seg mode the ratio is at index 3; in detection at index 2.
+        ratio_idx = 3 if self.task_type == "segmentation" else 2
+        data = sorted(data, key=lambda x: x[ratio_idx], reverse=True)
 
         logger.info(f"Recorded {valid_inputs}/{len(images_list)} valid inputs")
         return data
 
-    def load_valid_labels(self, label_path: str, seg_data_one_img: list) -> Union[Tensor, None]:
+    def load_valid_labels(self, label_path: str, seg_data_one_img: list) -> Tuple[Tensor, Union[List, None]]:
         """
         Loads valid COCO style segmentation data (values between [0, 1]) and converts it to bounding box coordinates
         by finding the minimum and maximum x and y values.
@@ -146,9 +161,13 @@ class YoloDataset(Dataset):
             seg_data_one_img (list): The actual list of annotations (in segmentation format)
 
         Returns:
-            Tensor or None: A tensor of all valid bounding boxes if any are found; otherwise, None.
+            Tuple of:
+              - Tensor: bounding boxes (N, 5) [cls, x_min, y_min, x_max, y_max]
+              - list or None: polygon list (each entry shape (1, 2K)) when task_type is
+                "segmentation", otherwise None.
         """
         bboxes = []
+        polygons = [] if self.task_type == "segmentation" else None
         for seg_data in seg_data_one_img:
             cls = seg_data[0]
             points = np.array(seg_data[1:]).reshape(-1, 2).clip(0, 1)
@@ -156,12 +175,33 @@ class YoloDataset(Dataset):
             if valid_points.size > 1:
                 bbox = torch.tensor([cls, *valid_points.min(axis=0), *valid_points.max(axis=0)])
                 bboxes.append(bbox)
+                if self.task_type == "segmentation":
+                    # Store polygon as normalized (1, 2K) flat array.
+                    polygons.append(valid_points.flatten().reshape(1, -1).astype(np.float32))
 
         if bboxes:
-            return torch.stack(bboxes)
+            return torch.stack(bboxes), polygons
         else:
             logger.warning(f"No valid BBox in {label_path}")
-            return torch.zeros((0, 5))
+            return torch.zeros((0, 5)), polygons
+
+    def _tensorlize_seg(self, data):
+        """Convert a list of 4-tuples (img_path, bboxes, polygons, ratio) for seg mode.
+
+        Returns img_paths, padded_bboxes (numpy), ratios (numpy), polygons (list-of-lists).
+        """
+        img_paths, bboxes_list, polygons_list, img_ratios = zip(*data)
+        max_box = max(bbox.size(0) for bbox in bboxes_list)
+        padded_bbox_list = []
+        for bbox in bboxes_list:
+            padding = torch.full((max_box, 5), -1, dtype=torch.float32)
+            padding[: bbox.size(0)] = bbox
+            padded_bbox_list.append(padding)
+        bboxes = np.stack(padded_bbox_list)
+        img_paths = np.array(img_paths)
+        img_ratios = np.array(img_ratios)
+        # polygons_list is a tuple of per-image polygon lists; keep as list-of-lists.
+        return img_paths, bboxes, img_ratios, list(polygons_list)
 
     def get_data(self, idx):
         img_path, bboxes = self.img_paths[idx], self.bboxes[idx]
@@ -172,10 +212,18 @@ class YoloDataset(Dataset):
             # orientation tags; without this, polygon/bbox coords land in the
             # wrong coordinate system.
             img = ImageOps.exif_transpose(img).convert("RGB")
-        return img, torch.from_numpy(bboxes[valid_mask]), img_path
+        valid_bboxes = torch.from_numpy(bboxes[valid_mask])
+        if self.task_type == "segmentation":
+            # Polygons are already filtered to valid (non-padded) entries by construction.
+            polygons = self.polygons[idx]
+            return img, valid_bboxes, polygons, img_path
+        return img, valid_bboxes, img_path
 
     def get_more_data(self, num: int = 1):
         indices = torch.randint(0, len(self), (num,))
+        if self.task_type == "segmentation":
+            # Return 3-tuples (img, bboxes, polygons) for Mosaic's seg mode.
+            return [self.get_data(idx)[:3] for idx in indices]
         return [self.get_data(idx)[:2] for idx in indices]
 
     def _update_image_size(self, idx: int) -> None:
@@ -188,6 +236,17 @@ class YoloDataset(Dataset):
         self.transform.pad_resize.set_size(self.image_size)
 
     def __getitem__(self, idx) -> Tuple[Image.Image, Tensor, Tensor, List[str]]:
+        if self.task_type == "segmentation":
+            img, bboxes, polygons, img_path = self.get_data(idx)
+
+            if self.dynamic_shape:
+                self._update_image_size(idx)
+
+            img, bboxes, polygons, rev_tensor = self.transform(img, bboxes, polygons=polygons)
+            bboxes[:, [1, 3]] *= self.image_size[0]
+            bboxes[:, [2, 4]] *= self.image_size[1]
+            return img, bboxes, polygons, rev_tensor, img_path
+
         img, bboxes, img_path = self.get_data(idx)
 
         if self.dynamic_shape:

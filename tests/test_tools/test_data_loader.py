@@ -70,3 +70,34 @@ def test_directory_stream_data_loader_frame(directory_stream_data_loader: Stream
     assert frame.shape == (1, 3, 640, 640)
     assert rev_tensor.shape == (1, 5)
     assert origin_frame.size != (640, 640)
+
+
+import numpy as np
+from yolo.tools.data_loader import YoloDataset
+
+
+def test_load_valid_labels_returns_polygons_when_segmentation_task():
+    dataset = YoloDataset.__new__(YoloDataset)
+    dataset.task_type = "segmentation"
+    seg = [[0, 0.1, 0.1, 0.5, 0.1, 0.5, 0.5, 0.1, 0.5]]
+    bboxes, polygons = dataset.load_valid_labels("img1", seg)
+    assert bboxes.shape == (1, 5)
+    assert isinstance(polygons, list)
+    assert polygons[0].shape == (1, 8)
+
+
+def test_load_valid_labels_returns_none_polygons_when_detection_task():
+    dataset = YoloDataset.__new__(YoloDataset)
+    dataset.task_type = "detection"
+    seg = [[0, 0.1, 0.1, 0.5, 0.1, 0.5, 0.5, 0.1, 0.5]]
+    bboxes, polygons = dataset.load_valid_labels("img1", seg)
+    assert bboxes.shape == (1, 5)
+    assert polygons is None
+
+
+def test_load_valid_labels_empty_input_segmentation_returns_empty_polygons():
+    dataset = YoloDataset.__new__(YoloDataset)
+    dataset.task_type = "segmentation"
+    bboxes, polygons = dataset.load_valid_labels("img1", [])
+    assert bboxes.shape == (0, 5)
+    assert polygons == []
