@@ -6,7 +6,7 @@ from typing import Generator, List, Tuple, Union
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 from rich.progress import track
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
@@ -124,7 +124,7 @@ class YoloDataset(Dataset):
             img_path = image_name if adjust_path else images_path / image_name
             if sort_image:
                 with Image.open(img_path) as img:
-                    width, height = img.size
+                    width, height = ImageOps.exif_transpose(img).size
             else:
                 width, height = 0, 1
             data.append((img_path, labels, width / height))
@@ -167,7 +167,11 @@ class YoloDataset(Dataset):
         img_path, bboxes = self.img_paths[idx], self.bboxes[idx]
         valid_mask = bboxes[:, 0] != -1
         with Image.open(img_path) as img:
-            img = img.convert("RGB")
+            # Apply EXIF orientation so the loaded image matches the (W, H)
+            # written to the COCO annotation JSON. Phone-camera images carry
+            # orientation tags; without this, polygon/bbox coords land in the
+            # wrong coordinate system.
+            img = ImageOps.exif_transpose(img).convert("RGB")
         return img, torch.from_numpy(bboxes[valid_mask]), img_path
 
     def get_more_data(self, num: int = 1):
@@ -281,7 +285,7 @@ class StreamDataLoader:
                 self.process_image(file_path)
 
     def process_image(self, image_path):
-        image = Image.open(image_path).convert("RGB")
+        image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
         if image is None:
             raise ValueError(f"Error loading image: {image_path}")
         self.process_frame(image)
