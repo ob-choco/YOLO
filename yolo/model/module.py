@@ -147,20 +147,35 @@ class Segmentation(nn.Module):
 
 
 class MultiheadSegmentation(nn.Module):
-    """Mutlihead Segmentation module for Dual segment or Triple segment"""
+    """Multihead segmentation: detection (per FPN) + mask coef (per FPN) + shared prototype.
+
+    Inputs to forward:
+        x_list — [P3_feat, P4_feat, P5_feat, proto_source_feat]
+
+    Output:
+        dict with keys:
+          "detect"      → list[tuple]; one (cls, anc, box) tuple per FPN level (3 levels)
+          "mask_coefs"  → list[Tensor]; one (B, num_maskes, h, w) tensor per FPN level
+          "proto"       → Tensor (B, num_maskes, H/4, W/4)
+    """
 
     def __init__(self, in_channels: List[int], num_classes: int, num_maskes: int, **head_kwargs):
         super().__init__()
         mask_channels, proto_channels = in_channels[:-1], in_channels[-1]
 
         self.detect = MultiheadDetection(mask_channels, num_classes, **head_kwargs)
-        self.heads = nn.ModuleList(
-            [Segmentation((in_channels[0], in_channel), num_maskes) for in_channel in mask_channels]
+        self.mask_heads = nn.ModuleList(
+            [Segmentation((mask_channels[0], in_channel), num_maskes) for in_channel in mask_channels]
         )
-        self.heads.append(Conv(proto_channels, num_maskes, 1))
+        self.proto_head = Conv(proto_channels, num_maskes, 1)
 
-    def forward(self, x_list: List[torch.Tensor]) -> List[torch.Tensor]:
-        return [head(x) for x, head in zip(x_list, self.heads)]
+    def forward(self, x_list: List[torch.Tensor]) -> dict:
+        feats = x_list[:-1]
+        proto_src = x_list[-1]
+        detect_outputs = self.detect(feats)
+        mask_coefs = [head(f) for head, f in zip(self.mask_heads, feats)]
+        proto = self.proto_head(proto_src)
+        return {"detect": detect_outputs, "mask_coefs": mask_coefs, "proto": proto}
 
 
 class Anchor2Vec(nn.Module):
