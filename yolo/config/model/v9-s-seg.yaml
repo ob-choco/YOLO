@@ -1,4 +1,5 @@
 name: v9-s-seg
+task_type: segmentation
 
 anchor:
   reg_max: 16

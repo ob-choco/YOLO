@@ -29,6 +29,7 @@ class ModelConfig:
     name: Optional[str]
     anchor: AnchorConfig
     model: Dict[str, BlockConfig]
+    task_type: str = "detection"   # "detection" | "segmentation" | "classification"
 
 
 @dataclass
