@@ -135,6 +135,78 @@ class DualLoss:
         return sum(total_loss), loss_dict
 
 
+class MaskLoss(nn.Module):
+    """YOLACT-style mask loss: BCE + Dice with bbox crop, averaged over positives.
+
+    Args (forward):
+        coefs:        (B, A, nm) per-anchor mask coefficient predictions
+        proto:        (B, nm, H, W) shared prototype masks per image
+        gt_masks:     (B, N_max, H, W) GT masks (uint8 or float)
+        target_bbox:  (B, N_max, 4) GT bbox xyxy in normalized [0,1] coords
+        match_idx:    (B, A) GT index each anchor is matched to (-1 = negative)
+
+    Returns:
+        scalar loss tensor.
+    """
+
+    def __init__(self, bce_weight: float = 0.5, dice_weight: float = 0.5):
+        super().__init__()
+        self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        self.bce_w = bce_weight
+        self.dice_w = dice_weight
+
+    @staticmethod
+    def _crop(mask: Tensor, bbox: Tensor) -> Tensor:
+        """Zero out everything outside the bbox region. mask (H, W); bbox xyxy in [0,1]."""
+        H, W = mask.shape[-2:]
+        x1 = (bbox[0] * W).clamp(0, W).long()
+        y1 = (bbox[1] * H).clamp(0, H).long()
+        x2 = (bbox[2] * W).clamp(0, W).long()
+        y2 = (bbox[3] * H).clamp(0, H).long()
+        cropped = torch.zeros_like(mask)
+        cropped[y1:y2, x1:x2] = mask[y1:y2, x1:x2]
+        return cropped
+
+    def forward(self, coefs, proto, gt_masks, target_bbox, match_idx):
+        device = coefs.device
+        positives = match_idx >= 0   # (B, A)
+        if not positives.any():
+            return torch.zeros((), device=device)
+
+        # gather GT-side data per positive
+        b_idx, a_idx = positives.nonzero(as_tuple=True)
+        gt_idx = match_idx[b_idx, a_idx]   # (P,)
+        coef = coefs[b_idx, a_idx]          # (P, nm)
+        proto_b = proto[b_idx]              # (P, nm, H, W)
+        gt = gt_masks[b_idx, gt_idx].float()       # (P, H, W)
+        bbox = target_bbox[b_idx, gt_idx]          # (P, 4)
+
+        # synthesize predicted masks
+        # einsum("pn,pnhw->phw")
+        pred_logit = torch.einsum("pn,pnhw->phw", coef, proto_b)   # (P, H, W)
+
+        # crop both pred and gt to bbox region
+        cropped_pred, cropped_gt = [], []
+        for p in range(pred_logit.shape[0]):
+            cp = self._crop(pred_logit[p], bbox[p])
+            cg = self._crop(gt[p], bbox[p])
+            cropped_pred.append(cp)
+            cropped_gt.append(cg)
+        cropped_pred = torch.stack(cropped_pred)
+        cropped_gt = torch.stack(cropped_gt)
+
+        # BCE on logits, mean over (H, W)
+        bce_per = self.bce(cropped_pred, cropped_gt).mean(dim=(-1, -2))
+
+        # Dice on sigmoid
+        prob = cropped_pred.sigmoid()
+        intersection = (prob * cropped_gt).sum(dim=(-1, -2))
+        union = prob.sum(dim=(-1, -2)) + cropped_gt.sum(dim=(-1, -2))
+        dice = 1 - (2 * intersection + 1) / (union + 1)
+
+        return (self.bce_w * bce_per + self.dice_w * dice).mean()
+
+
 def create_loss_function(cfg: Config, vec2box) -> DualLoss:
     # TODO: make it flexible, if cfg doesn't contain aux, only use SingleLoss
     loss_function = DualLoss(cfg, vec2box)
