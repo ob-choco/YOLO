@@ -126,7 +126,8 @@ class VerticalFlip:
 
 
 class Mosaic:
-    """Applies the Mosaic augmentation to a batch of images and their corresponding boxes."""
+    """Applies the Mosaic augmentation to a batch of images and their corresponding
+    boxes (and polygons if provided)."""
 
     def __init__(self, prob=0.5):
         self.prob = prob
@@ -135,7 +136,7 @@ class Mosaic:
     def set_parent(self, parent):
         self.parent = parent
 
-    def __call__(self, image, boxes):
+    def __call__(self, image, boxes, polygons=None):
         if torch.rand(1) >= self.prob:
             return image, boxes
 
@@ -144,28 +145,50 @@ class Mosaic:
         img_sz = self.parent.base_size  # Assuming `image_size` is defined in parent
         more_data = self.parent.get_more_data(3)  # get 3 more images randomly
 
-        data = [(image, boxes)] + more_data
+        seg_mode = polygons is not None
+        if seg_mode:
+            data = [(image, boxes, polygons)] + more_data
+        else:
+            data = [(image, boxes)] + more_data
+
         mosaic_image = Image.new("RGB", (2 * img_sz, 2 * img_sz), (114, 114, 114))
         vectors = np.array([(-1, -1), (0, -1), (-1, 0), (0, 0)])
         center = np.array([img_sz, img_sz])
         all_labels = []
+        all_polys = []
 
-        for (image, boxes), vector in zip(data, vectors):
-            this_w, this_h = image.size
+        for sample, vector in zip(data, vectors):
+            if seg_mode:
+                image_q, boxes_q, polys_q = sample
+            else:
+                image_q, boxes_q = sample
+                polys_q = None
+
+            this_w, this_h = image_q.size
             coord = tuple(center + vector * np.array([this_w, this_h]))
 
-            mosaic_image.paste(image, coord)
-            xmin, ymin, xmax, ymax = boxes[:, 1], boxes[:, 2], boxes[:, 3], boxes[:, 4]
+            mosaic_image.paste(image_q, coord)
+            xmin, ymin, xmax, ymax = boxes_q[:, 1], boxes_q[:, 2], boxes_q[:, 3], boxes_q[:, 4]
             xmin = (xmin * this_w + coord[0]) / (2 * img_sz)
             xmax = (xmax * this_w + coord[0]) / (2 * img_sz)
             ymin = (ymin * this_h + coord[1]) / (2 * img_sz)
             ymax = (ymax * this_h + coord[1]) / (2 * img_sz)
 
-            adjusted_boxes = torch.stack([boxes[:, 0], xmin, ymin, xmax, ymax], dim=1)
+            adjusted_boxes = torch.stack([boxes_q[:, 0], xmin, ymin, xmax, ymax], dim=1)
             all_labels.append(adjusted_boxes)
+
+            if seg_mode:
+                for p in polys_q:
+                    pts = np.asarray(p).reshape(-1, 2).astype(np.float32, copy=True)
+                    pts[:, 0] = (pts[:, 0] * this_w + coord[0]) / (2 * img_sz)
+                    pts[:, 1] = (pts[:, 1] * this_h + coord[1]) / (2 * img_sz)
+                    pts = np.clip(pts, 0.0, 1.0)
+                    all_polys.append(pts.reshape(1, -1))
 
         all_labels = torch.cat(all_labels, dim=0)
         mosaic_image = mosaic_image.resize((img_sz, img_sz))
+        if seg_mode:
+            return mosaic_image, all_labels, all_polys
         return mosaic_image, all_labels
 
 
