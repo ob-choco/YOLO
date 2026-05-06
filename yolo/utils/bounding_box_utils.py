@@ -263,7 +263,9 @@ class BoxMatcher:
         unique_indices = topk_mask.to(torch.uint8).argmax(dim=1)
         return unique_indices[..., None], topk_mask.any(dim=1), topk_mask
 
-    def __call__(self, target: Tensor, predict: Tuple[Tensor]) -> Tuple[Tensor, Tensor]:
+    def __call__(
+        self, target: Tensor, predict: Tuple[Tensor], return_match_idx: bool = False
+    ) -> Tuple[Tensor, Tensor]:
         """Matches each target to the most suitable anchor.
         1. For each anchor prediction, find the highest suitability targets.
         2. Match target to the best anchor.
@@ -275,6 +277,8 @@ class BoxMatcher:
             predict: Tuple of predicted class and bounding box tensors.
                 Class tensor is of size [batch x anchors x class]
                 Bounding box tensor is of size [batch x anchors x 4].
+            return_match_idx: If True, also return a (batch x anchors) long tensor
+                with the GT index matched to each anchor (-1 for unmatched negatives).
 
         Returns:
             anchor_matched_targets: Tensor of size [batch x anchors x (class + 4)].
@@ -282,6 +286,8 @@ class BoxMatcher:
                 The class probabilities are normalized.
             valid_mask: Bool tensor of shape [batch x anchors].
                 True if a anchor has a target/gt assigned to it.
+            match_idx (only when return_match_idx=True): Long tensor of shape
+                [batch x anchors] with the GT index for each anchor (-1 = negative).
         """
         predict_cls, predict_bbox = predict
 
@@ -293,6 +299,9 @@ class BoxMatcher:
             align_bbox = torch.zeros_like(predict_bbox, device=device)
             valid_mask = torch.zeros(predict_cls.shape[:2], dtype=bool, device=device)
             anchor_matched_targets = torch.cat([align_cls, align_bbox], dim=-1)
+            if return_match_idx:
+                match_idx = torch.full(predict_cls.shape[:2], -1, dtype=torch.long, device=device)
+                return anchor_matched_targets, valid_mask, match_idx
             return anchor_matched_targets, valid_mask
 
         target_cls, target_bbox = target.split([1, 4], dim=-1)  # B x N x (C B) -> B x N x C, B x N x B
@@ -332,6 +341,10 @@ class BoxMatcher:
         normalize_term = normalize_term.permute(0, 2, 1).gather(2, unique_indices)
         align_cls = align_cls * normalize_term * valid_mask[:, :, None]
         anchor_matched_targets = torch.cat([align_cls, align_bbox], dim=-1)
+        if return_match_idx:
+            match_idx = unique_indices.squeeze(-1).long()
+            match_idx = match_idx.masked_fill(~valid_mask, -1)
+            return anchor_matched_targets, valid_mask, match_idx
         return anchor_matched_targets, valid_mask
 
 

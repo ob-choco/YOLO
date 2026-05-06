@@ -1,6 +1,7 @@
 from math import ceil
 from pathlib import Path
 
+import torch
 from lightning import LightningModule
 from torchmetrics.detection import MeanAveragePrecision
 
@@ -69,6 +70,7 @@ class TrainModel(ValidateModel):
     def __init__(self, cfg: Config):
         super().__init__(cfg)
         self.cfg = cfg
+        self.task_type = getattr(cfg.model, "task_type", "detection")
         self.train_loader = create_dataloader(self.cfg.task.data, self.cfg.dataset, self.cfg.task.task)
 
     def setup(self, stage):
@@ -84,13 +86,55 @@ class TrainModel(ValidateModel):
         )
         self.vec2box.update(self.cfg.image_size)
 
+    def _compute_match_idx(self, main_predicts, targets):
+        """Returns (B, A) long tensor with GT index per anchor (-1 = negative).
+
+        Reuses BoxMatcher (already instantiated inside YOLOLoss via self.loss_fn.loss.matcher)
+        to produce the GT-index assignment for each anchor.  The optional
+        return_match_idx=True flag was added to BoxMatcher.__call__ specifically to
+        surface the unique_indices tensor that is already computed internally but not
+        normally returned.
+        """
+        preds_cls, _, preds_box = main_predicts
+        matcher = self.loss_fn.loss.matcher
+        _, _, match_idx = matcher(
+            targets, (preds_cls.detach(), preds_box.detach()), return_match_idx=True
+        )
+        return match_idx
+
     def training_step(self, batch, batch_idx):
         lr_dict = self.trainer.optimizers[0].next_batch()
-        batch_size, images, targets, *_ = batch
-        predicts = self(images)
-        aux_predicts = self.vec2box(predicts["AUX"])
-        main_predicts = self.vec2box(predicts["Main"])
-        loss, loss_item = self.loss_fn(aux_predicts, main_predicts, targets)
+        if self.task_type == "segmentation":
+            batch_size, images, targets, gt_masks, *_ = batch
+            raw = self(images)
+            # AUX is unchanged — list of (cls, anc, box) tuples
+            aux_predicts = self.vec2box(raw["AUX"])
+            # Main is a dict; route detect through Vec2Box, keep mask outputs
+            main_dict = raw["Main"]
+            main_detect = self.vec2box(main_dict["detect"])
+
+            # Gather per-anchor coefficients across the 3 FPN levels into (B, A, nm).
+            # mask_coefs is a list of (B, nm, h, w) — flatten + concat across spatial dim.
+            coefs = torch.cat(
+                [c.flatten(2).transpose(1, 2) for c in main_dict["mask_coefs"]],
+                dim=1,
+            )
+            proto = main_dict["proto"]
+
+            # Compute per-anchor GT-index assignment using the matcher already inside loss_fn.
+            match_idx = self._compute_match_idx(main_detect, targets)
+            target_bbox = targets[..., 1:5]
+
+            loss, loss_item = self.loss_fn(
+                aux_predicts, main_detect, targets,
+                mask_inputs=(coefs, proto, gt_masks, target_bbox, match_idx),
+            )
+        else:
+            batch_size, images, targets, *_ = batch
+            predicts = self(images)
+            aux_predicts = self.vec2box(predicts["AUX"])
+            main_predicts = self.vec2box(predicts["Main"])
+            loss, loss_item = self.loss_fn(aux_predicts, main_predicts, targets)
         self.log_dict(
             loss_item,
             prog_bar=True,
