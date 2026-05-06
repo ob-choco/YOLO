@@ -304,7 +304,7 @@ def create_dataloader(data_cfg: DataConfig, dataset_cfg: DatasetConfig, task: st
         batch_size=data_cfg.batch_size,
         num_workers=data_cfg.cpu_num,
         pin_memory=data_cfg.pin_memory,
-        collate_fn=collate_fn,
+        collate_fn=pick_collate_fn(dataset_cfg),
     )
 
 
@@ -403,3 +403,52 @@ class StreamDataLoader:
 
     def __len__(self):
         return self.queue.qsize() if not self.is_stream else 0
+
+
+def collate_fn_seg(batch):
+    """Variant of `collate_fn` for segmentation: pads targets AND rasterizes
+    polygons to stride-4 binary masks at collate time.
+
+    Each sample is `(image, bboxes (N,5), polygons (list[ndarray]), rev, path)`.
+    Returns:
+        batch_size, images (B,C,H,W), batch_targets (B,N_max,5),
+        batch_masks (B,N_max,H/4,W/4) uint8, revs (B,4), paths (tuple)
+    """
+    from yolo.utils.dataset_utils import rasterize_masks
+
+    batch_size = len(batch)
+    target_sizes = [item[1].size(0) for item in batch]
+    n_max = min(max(target_sizes) if target_sizes else 1, 100)
+    # n_max must be at least 1 for shape consistency even when all samples have zero instances
+    n_max = max(n_max, 1)
+
+    # Pad bboxes: shape (B, n_max, 5) with cls = -1 for padding
+    batch_targets = torch.full((batch_size, n_max, 5), -1.0)
+    for idx, n in enumerate(target_sizes):
+        n_use = min(n, n_max)
+        if n_use > 0:
+            batch_targets[idx, :n_use] = batch[idx][1][:n_use]
+
+    # Rasterize polygons → masks (B, n_max, H/4, W/4)
+    sample_img = batch[0][0]
+    img_h, img_w = sample_img.shape[-2:]
+    mask_h, mask_w = img_h // 4, img_w // 4
+    batch_masks = torch.zeros((batch_size, n_max, mask_h, mask_w), dtype=torch.uint8)
+    for idx, item in enumerate(batch):
+        polys = item[2]
+        n_use = min(len(polys), n_max)
+        if n_use > 0:
+            rast = rasterize_masks(polys[:n_use], image_size=(img_w, img_h), mask_ratio=4)
+            batch_masks[idx, :n_use] = rast
+
+    images = torch.stack([item[0] for item in batch])
+    revs = torch.stack([item[3] for item in batch])
+    paths = tuple(item[4] for item in batch)
+    return batch_size, images, batch_targets, batch_masks, revs, paths
+
+
+def pick_collate_fn(dataset_cfg):
+    """Return the collate_fn appropriate for the dataset's task_type."""
+    if getattr(dataset_cfg, "task_type", "detection") == "segmentation":
+        return collate_fn_seg
+    return collate_fn
