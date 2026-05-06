@@ -4,3 +4,4 @@ validation: val
 
 class_num: 2
 class_list: ["hold", "volume"]
+task_type: segmentation
