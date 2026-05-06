@@ -82,29 +82,47 @@ class PadAndResize:
 
 
 class HorizontalFlip:
-    """Randomly horizontally flips the image along with the bounding boxes."""
+    """Randomly horizontally flips the image along with the bounding boxes (and polygons if provided)."""
 
     def __init__(self, prob=0.5):
         self.prob = prob
 
-    def __call__(self, image, boxes):
+    def __call__(self, image, boxes, polygons=None):
         if torch.rand(1) < self.prob:
             image = TF.hflip(image)
             boxes[:, [1, 3]] = 1 - boxes[:, [3, 1]]
-        return image, boxes
+            if polygons is not None:
+                flipped = []
+                for p in polygons:
+                    pts = np.asarray(p).reshape(-1, 2).astype(np.float32, copy=True)
+                    pts[:, 0] = 1.0 - pts[:, 0]
+                    flipped.append(pts.reshape(1, -1))
+                polygons = flipped
+        if polygons is None:
+            return image, boxes
+        return image, boxes, polygons
 
 
 class VerticalFlip:
-    """Randomly vertically flips the image along with the bounding boxes."""
+    """Randomly vertically flips the image along with the bounding boxes (and polygons if provided)."""
 
     def __init__(self, prob=0.5):
         self.prob = prob
 
-    def __call__(self, image, boxes):
+    def __call__(self, image, boxes, polygons=None):
         if torch.rand(1) < self.prob:
             image = TF.vflip(image)
             boxes[:, [2, 4]] = 1 - boxes[:, [4, 2]]
-        return image, boxes
+            if polygons is not None:
+                flipped = []
+                for p in polygons:
+                    pts = np.asarray(p).reshape(-1, 2).astype(np.float32, copy=True)
+                    pts[:, 1] = 1.0 - pts[:, 1]
+                    flipped.append(pts.reshape(1, -1))
+                polygons = flipped
+        if polygons is None:
+            return image, boxes
+        return image, boxes, polygons
 
 
 class Mosaic:
