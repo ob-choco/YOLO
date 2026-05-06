@@ -90,6 +90,14 @@ replace_dict = {"cv": "conv", ".m.": ".bottleneck."}
 
 
 def convert_weight_seg(old_state_dict, new_state_dict):
+    # NOTE: Stale w.r.t. the current MultiheadSegmentation layout. This converter
+    # was written for an earlier `self.heads` ModuleList (proto at index 3, coef
+    # heads at 0..2). The class now exposes `self.mask_heads` (per-FPN coef heads)
+    # and `self.proto_head` (the prototype Conv) — see yolo/model/module.py.
+    # Mappings below still emit "heads"/"detect.heads" string keys that no longer
+    # match the live module. Use tools/weight_transfer/v9_to_seg.py for new
+    # detection→seg transfers (Task 13). Update this function if/when external
+    # ultralytics-style seg checkpoints are reintroduced.
     diff = -1
     for old_weight_name in old_state_dict.keys():
         old_idx = int(old_weight_name.split(".")[1])
