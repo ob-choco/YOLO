@@ -58,23 +58,42 @@ def convert_via_to_coco(
         if not valid_anns:
             continue
 
-        # resolve image size
-        if image_size_lookup and filename in image_size_lookup:
+        # resolve image size — apply EXIF orientation so width/height match what
+        # the labeling tool displayed (and what the data loader will see after
+        # ImageOps.exif_transpose), not the on-disk pixel layout.
+        if image_size_lookup is not None and filename in image_size_lookup:
             width, height = image_size_lookup[filename]
         elif images_dir is not None:
-            from PIL import Image  # local import: only needed if no lookup
+            from PIL import Image, ImageOps  # local import
             with Image.open(Path(images_dir) / filename) as im:
-                width, height = im.size
+                width, height = ImageOps.exif_transpose(im).size
         else:
             raise ValueError(
                 f"image_size for {filename} unresolved (provide image_size_lookup or images_dir)"
             )
+
+        # Detect a global polygon coordinate scale. Some datasets are labeled at a
+        # downsampled resolution (e.g. bh-phone in this project: VIA polygons were
+        # drawn on a 1/2-resolution version of each EXIF-rotated image). We infer
+        # the scale by comparing the maximum polygon extent to the displayed
+        # image size and rounding to the nearest integer ≥ 1.
+        max_coord = 0
+        for xs, ys, _ in valid_anns:
+            max_coord = max(max_coord, max(xs), max(ys))
+        scale = 1
+        if max_coord > 0:
+            ratio = max(width, height) / max_coord
+            if ratio >= 1.7:   # well above 1 → coords are at < ~60% of image, infer downsample
+                scale = round(ratio) if ratio - round(ratio) < 0.4 else int(ratio)
+                scale = max(scale, 2)
 
         images.append(
             {"id": image_id, "file_name": filename, "width": width, "height": height}
         )
 
         for xs, ys, hold_type in valid_anns:
+            xs = [x * scale for x in xs]
+            ys = [y * scale for y in ys]
             seg_flat = [v for pair in zip(xs, ys) for v in pair]
             x_min, x_max = min(xs), max(xs)
             y_min, y_max = min(ys), max(ys)

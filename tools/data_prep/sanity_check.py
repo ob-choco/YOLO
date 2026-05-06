@@ -7,6 +7,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image, ImageOps
 
 
 def render_sanity(
@@ -24,9 +25,15 @@ def render_sanity(
     sampled = random.sample(list(images_by_id.values()), min(sample, len(images_by_id)))
     for img in sampled:
         path = images_dir / img["file_name"]
-        canvas = cv2.imread(str(path))
-        if canvas is None:
+        # Use PIL with EXIF transpose so the canvas matches the (width, height)
+        # recorded in the COCO JSON (which is the EXIF-displayed size).
+        try:
+            with Image.open(path) as pil_img:
+                rotated = ImageOps.exif_transpose(pil_img).convert("RGB")
+        except (FileNotFoundError, OSError):
             continue
+        canvas = np.array(rotated)[:, :, ::-1].copy()   # RGB → BGR for cv2
+
         for a in anns_by_image.get(img["id"], []):
             poly = np.array(a["segmentation"][0], dtype=np.int32).reshape(-1, 2)
             cv2.polylines(canvas, [poly], isClosed=True, color=color[a["category_id"]], thickness=2)

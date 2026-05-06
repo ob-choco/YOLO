@@ -48,11 +48,12 @@ def via_json(tmp_path: Path) -> Path:
 def test_convert_via_to_coco_writes_coco_with_two_categories(via_json: Path, tmp_path: Path):
     """Converter emits standard COCO instance-seg JSON with hold(0)/volume(1)."""
     out_path = tmp_path / "coco.json"
-    # image_size_lookup maps filename -> (width, height) so the test does not need real images
+    # image_size_lookup maps filename -> (width, height) so the test does not need real images.
+    # Image is 50×50 here so polygon max coord (40) is ≥ 60% of image dim → no auto-scale.
     convert_via_to_coco(
         via_json=via_json,
         output_json=out_path,
-        image_size_lookup={"img1.jpg": (100, 100)},
+        image_size_lookup={"img1.jpg": (50, 50)},
     )
     coco = json.loads(out_path.read_text())
     assert {c["name"] for c in coco["categories"]} == {"hold", "volume"}
@@ -64,6 +65,46 @@ def test_convert_via_to_coco_writes_coco_with_two_categories(via_json: Path, tmp
     assert ann["segmentation"] == [[10, 10, 20, 10, 20, 20, 10, 20]]
     assert ann["bbox"] == [10, 10, 10, 10]   # x, y, w, h
     assert ann["iscrowd"] == 0
+
+
+def test_convert_via_to_coco_scales_polygons_when_labeling_resolution_is_downsampled(tmp_path: Path):
+    """If polygon coords reach only a fraction of image size, infer integer ×N scale.
+
+    Emulates the bh-phone case where VIA polygons were drawn on a 1/2-resolution
+    EXIF-rotated image but the on-disk file is at full resolution.
+    """
+    via = {
+        "_via_img_metadata": {
+            "img.jpg100": {
+                "filename": "img.jpg",
+                "size": 100,
+                "regions": [
+                    {
+                        "shape_attributes": {
+                            "name": "polygon",
+                            "all_points_x": [10, 90, 90, 10],   # max coord 90
+                            "all_points_y": [10, 10, 90, 90],
+                        },
+                        "region_attributes": {"hold_type": "hold"},
+                    }
+                ],
+            }
+        }
+    }
+    via_path = tmp_path / "via.json"
+    via_path.write_text(json.dumps(via))
+    out_path = tmp_path / "coco.json"
+    # Image (200, 200) — ratio = 200/90 ≈ 2.22 → scale = 2 → coords doubled
+    convert_via_to_coco(
+        via_json=via_path,
+        output_json=out_path,
+        image_size_lookup={"img.jpg": (200, 200)},
+    )
+    coco = json.loads(out_path.read_text())
+    ann = coco["annotations"][0]
+    # Polygons multiplied by 2; flattened
+    assert ann["segmentation"] == [[20, 20, 180, 20, 180, 180, 20, 180]]
+    assert ann["bbox"] == [20, 20, 160, 160]
 
 
 def test_convert_via_to_coco_skips_polygons_with_fewer_than_three_points(tmp_path: Path):
