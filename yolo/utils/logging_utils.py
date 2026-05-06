@@ -118,7 +118,7 @@ class YOLORichProgressBar(RichProgressBar):
 
     @override
     @rank_zero_only
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx: int = 0) -> None:
         if self.is_disabled:
             return
         if trainer.sanity_checking:
@@ -157,9 +157,12 @@ class YOLORichProgressBar(RichProgressBar):
         self.past_results.append((trainer.current_epoch, ap_main))
 
     @override
-    def refresh(self) -> None:
+    def refresh(self, hard: bool = False) -> None:
         if self.progress:
-            self.progress.refresh()
+            if hard:
+                self.progress.refresh()
+            else:
+                self.progress.soft_refresh()
 
     @property
     def validation_description(self) -> str:
