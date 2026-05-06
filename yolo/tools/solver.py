@@ -47,12 +47,14 @@ class ValidateModel(BaseModel):
         return self.val_loader
 
     def validation_step(self, batch, batch_idx):
-        # Seg-mode collate emits an extra `gt_masks` slot between targets and rev_tensor.
-        # Strip it; bbox metric path doesn't consume masks.
-        if self.task_type == "segmentation":
-            batch_size, images, targets, _gt_masks, rev_tensor, img_paths = batch
-        else:
-            batch_size, images, targets, rev_tensor, img_paths = batch
+        # Tail-flexible unpack: detection collate emits 5-tuple
+        # (batch_size, images, targets, rev, paths); seg collate emits 6-tuple
+        # with an extra gt_masks slot. Bbox metric path doesn't consume masks
+        # so we just pull batch_size/images/targets from the head and rev/paths
+        # from the tail. Works for both phases independent of model.task_type vs
+        # dataset.task_type alignment.
+        batch_size, images, targets = batch[0], batch[1], batch[2]
+        rev_tensor, img_paths = batch[-2], batch[-1]
         H, W = images.shape[2:]
         predicts = self.post_process(self.ema(images), image_size=[W, H])
         mAP = self.metric(
